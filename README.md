@@ -3,6 +3,8 @@
 
 Native macOS app to split a PDF into per-page PDFs and export per-page images. It supports PNG and WEBP, with cropping, padding, DPI control, and optional scaling.
 
+PNG rendering defaults to Poppler (`pdftocairo`/`pdftoppm`) for sharper output; you can disable it in the UI to use PDFKit instead. Install Poppler with `brew install poppler` if needed.
+
 WEBP quality is adjustable, and WEBP export can fall back to `cwebp` if ImageIO does not support it.
 
 Below is a screenshot of the interface.

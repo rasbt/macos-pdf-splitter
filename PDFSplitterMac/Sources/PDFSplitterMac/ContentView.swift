@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var outputPNG = true
     @State private var outputWEBP = false
     @State private var webpQualityText = "90"
+    @State private var usePoppler = true
     @State private var isProcessing = false
     @State private var isDropTargeted = false
     @State private var logLines: [String] = ["Drop a PDF or choose a file."]
@@ -67,6 +68,11 @@ struct ContentView: View {
                         TextField("", text: $scaleText)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 80)
+                    }
+
+                    LabeledRow(label: "Render:") {
+                        Toggle("Poppler", isOn: $usePoppler)
+                            .toggleStyle(.checkbox)
                     }
 
                     LabeledRow(label: "Chapter:") {
@@ -269,6 +275,7 @@ struct ContentView: View {
                     padding: padding,
                     scalePercent: scalePercent,
                     webpQuality: webpQuality,
+                    usePoppler: usePoppler,
                     chapter: chapterValue,
                     log: { message in
                         appendLogFromBackground(message)

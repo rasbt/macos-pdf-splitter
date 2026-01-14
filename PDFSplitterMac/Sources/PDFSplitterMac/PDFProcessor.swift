@@ -14,6 +14,8 @@ enum PDFProcessingError: LocalizedError {
     case invalidPDF
     case webpUnavailable(String)
     case webpConversionFailed(String)
+    case popplerUnavailable(String)
+    case popplerRenderFailed(String)
     case imageDestinationFailed(String)
 
     var errorDescription: String? {
@@ -24,6 +26,10 @@ enum PDFProcessingError: LocalizedError {
             return message
         case .webpConversionFailed(let message):
             return message
+        case .popplerUnavailable(let message):
+            return message
+        case .popplerRenderFailed(let message):
+            return message
         case .imageDestinationFailed(let message):
             return message
         }
@@ -31,6 +37,16 @@ enum PDFProcessingError: LocalizedError {
 }
 
 enum PDFProcessor {
+    private enum ImageRenderer {
+        case pdfKit
+        case poppler(URL, PopplerTool)
+    }
+
+    private enum PopplerTool {
+        case pdftocairo
+        case pdftoppm
+    }
+
     private enum WebpExportMode {
         case imageIO(UTType)
         case cwebp(URL)
@@ -44,6 +60,7 @@ enum PDFProcessor {
         padding: Int,
         scalePercent: Int,
         webpQuality: Int,
+        usePoppler: Bool,
         chapter: String?,
         log: (String) -> Void
     ) throws {
@@ -80,10 +97,17 @@ enum PDFProcessor {
 
         let needsImages = outputs.png || outputs.webp
         if needsImages {
+            let renderer = try imageRenderer(usePoppler: usePoppler)
             let webpMode = try webpExportModeIfNeeded(outputs.webp)
             for index in 0..<pageCount {
-                guard let page = document.page(at: index) else { continue }
-                guard let rendered = render(page: page, dpi: dpi) else { continue }
+                let page = document.page(at: index)
+                guard let rendered = try render(
+                    page: page,
+                    pageIndex: index,
+                    pdfURL: pdfURL,
+                    dpi: dpi,
+                    renderer: renderer
+                ) else { continue }
                 let trimmed = trimWhitespace(image: rendered)
                 let padded = addPadding(image: trimmed, padding: max(0, padding))
                 let resized = resize(image: padded, scale: scaleFactor)
@@ -169,7 +193,29 @@ enum PDFProcessor {
         return baseName
     }
 
-    private static func render(page: PDFPage, dpi: Int) -> CGImage? {
+    private static func render(
+        page: PDFPage?,
+        pageIndex: Int,
+        pdfURL: URL,
+        dpi: Int,
+        renderer: ImageRenderer
+    ) throws -> CGImage? {
+        switch renderer {
+        case .pdfKit:
+            guard let page else { return nil }
+            return renderPDFKit(page: page, dpi: dpi)
+        case .poppler(let executable, let tool):
+            return try renderPoppler(
+                executable: executable,
+                tool: tool,
+                pdfURL: pdfURL,
+                pageIndex: pageIndex,
+                dpi: dpi
+            )
+        }
+    }
+
+    private static func renderPDFKit(page: PDFPage, dpi: Int) -> CGImage? {
         guard let pageRef = page.pageRef else { return nil }
         let pageRect = pageRef.getBoxRect(.mediaBox)
         let scale = CGFloat(dpi) / 72.0
@@ -201,6 +247,112 @@ enum PDFProcessor {
         context.restoreGState()
 
         return context.makeImage()
+    }
+
+    private static func renderPoppler(
+        executable: URL,
+        tool: PopplerTool,
+        pdfURL: URL,
+        pageIndex: Int,
+        dpi: Int
+    ) throws -> CGImage? {
+        let pageNumber = pageIndex + 1
+        let tempDir = FileManager.default.temporaryDirectory
+        let baseName = "pdfsplitter_\(UUID().uuidString)"
+        let baseURL = tempDir.appendingPathComponent(baseName)
+        let outputURL = baseURL.appendingPathExtension("png")
+
+        let arguments: [String]
+        let candidates: [URL]
+        switch tool {
+        case .pdftocairo:
+            arguments = [
+                "-png",
+                "-r", "\(dpi)",
+                "-f", "\(pageNumber)",
+                "-l", "\(pageNumber)",
+                "-singlefile",
+                pdfURL.path,
+                baseURL.path
+            ]
+            candidates = [
+                outputURL,
+                tempDir.appendingPathComponent("\(baseName)-\(pageNumber)").appendingPathExtension("png")
+            ]
+        case .pdftoppm:
+            arguments = [
+                "-png",
+                "-r", "\(dpi)",
+                "-f", "\(pageNumber)",
+                "-l", "\(pageNumber)",
+                pdfURL.path,
+                baseURL.path
+            ]
+            candidates = [
+                tempDir.appendingPathComponent("\(baseName)-\(pageNumber)").appendingPathExtension("png"),
+                tempDir.appendingPathComponent("\(baseName)-\(String(format: "%02d", pageNumber))")
+                    .appendingPathExtension("png"),
+                outputURL
+            ]
+        }
+
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        do {
+            try process.run()
+        } catch {
+            throw PDFProcessingError.popplerRenderFailed("Failed to launch poppler: \(error.localizedDescription)")
+        }
+        process.waitUntilExit()
+        if process.terminationStatus != 0 {
+            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let stdout = String(data: stdoutData, encoding: .utf8) ?? ""
+            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+            let message = ([stdout, stderr].joined(separator: "\n")).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw PDFProcessingError.popplerRenderFailed("Poppler failed: \(message)")
+        }
+
+        let imageURL = candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+            ?? findPopplerOutput(prefix: baseName, in: tempDir)
+        guard let imageURL else {
+            throw PDFProcessingError.popplerRenderFailed("Poppler did not produce an output image.")
+        }
+
+        let imageData: Data
+        do {
+            imageData = try Data(contentsOf: imageURL)
+        } catch {
+            throw PDFProcessingError.popplerRenderFailed("Failed to read poppler output: \(error.localizedDescription)")
+        }
+
+        let cleanup = candidates + [imageURL]
+        for url in cleanup {
+            try? FileManager.default.removeItem(at: url)
+        }
+
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            return nil
+        }
+        return image
+    }
+
+    private static func findPopplerOutput(prefix: String, in directory: URL) -> URL? {
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else {
+            return nil
+        }
+        return contents.first { url in
+            url.pathExtension.lowercased() == "png" && url.lastPathComponent.hasPrefix(prefix)
+        }
     }
 
     private static func trimWhitespace(image: CGImage, threshold: UInt8 = 245) -> CGImage {
@@ -282,7 +434,6 @@ enum PDFProcessor {
         guard abs(scale - 1.0) > 0.001 else { return image }
         let newWidth = max(1, Int((Double(image.width) * scale).rounded()))
         let newHeight = max(1, Int((Double(image.height) * scale).rounded()))
-
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
         guard let context = CGContext(
@@ -300,6 +451,19 @@ enum PDFProcessor {
         context.interpolationQuality = .high
         context.draw(image, in: CGRect(x: 0, y: 0, width: newWidth, height: newHeight))
         return context.makeImage() ?? image
+    }
+
+    private static func imageRenderer(usePoppler: Bool) throws -> ImageRenderer {
+        guard usePoppler else { return .pdfKit }
+        if let pdftocairo = findExecutable(named: "pdftocairo") {
+            return .poppler(pdftocairo, .pdftocairo)
+        }
+        if let pdftoppm = findExecutable(named: "pdftoppm") {
+            return .poppler(pdftoppm, .pdftoppm)
+        }
+        throw PDFProcessingError.popplerUnavailable(
+            "Poppler rendering is enabled but pdftocairo/pdftoppm was not found. Install poppler with `brew install poppler`."
+        )
     }
 
     private static func writeImage(
