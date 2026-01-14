@@ -1,0 +1,30 @@
+.DS_Store
+.tmp/
+dist/
+build/
+*.app/
+*.dSYM
+*.dSYM.zip
+
+# Xcode
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
