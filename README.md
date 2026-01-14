@@ -13,7 +13,15 @@ And the following screenshot shows a list of the generated files.
 
 ![Example](docs/doc-2.png)&nbsp;
 
+&nbsp;
+## Download and use app
+
+Download and open [PDF.Splitter.dmg](https://github.com/rasbt/macos-pdf-splitter/releases/download/v1.0/PDF.Splitter.dmg), which contains the `PDF Splitter.app`.
+
+&nbsp;
 ## Build and run
+
+Alternatively, build the App locally yourself:
 
 - Open `PDFSplitterMacApp.xcodeproj` in Xcode.
 - Select the `PDFSplitterMacApp` scheme and run (`⌘R`).
