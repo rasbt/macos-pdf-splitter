@@ -13,7 +13,10 @@ And the following screenshot shows a list of the generated files.
 
 ![Example](docs/doc-2.png)&nbsp;
 
+Try it yourself using the [docs/all-figures.pdf](docs/all-figures.pdf) demo PDF.
+
 &nbsp;
+
 ## Download and use app
 
 Download and open [PDF.Splitter.dmg](https://github.com/rasbt/macos-pdf-splitter/releases/download/v1.0/PDF.Splitter.dmg), which contains the `PDF Splitter.app`.
