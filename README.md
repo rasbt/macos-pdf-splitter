@@ -26,14 +26,32 @@ Download and open [PDF.Splitter.dmg](https://github.com/rasbt/macos-pdf-splitter
 &nbsp;
 ## Build and run
 
-Alternatively, build the App locally yourself:
+Alternatively, build the app locally yourself:
 
-- Open `PDFSplitterMacApp.xcodeproj` in Xcode.
-- Select the `PDFSplitterMacApp` scheme and run (`⌘R`).
+```bash
+swift build
+swift run
+```
 
 &nbsp;
-## Export a .app bundle from Xcode
+## Build a release app bundle
 
-- In Xcode, choose Product → Build (or `⌘B`).
-- Then choose Product → Show Build Folder.
-- Open `Products/Debug/` (or `Release/`) to find `PDF Splitter.app`.
+To create the macOS app bundle and release zip, run:
+
+```bash
+./scripts/build_release_app.sh
+```
+
+The script accepts two optional arguments:
+
+```bash
+./scripts/build_release_app.sh <version> <build-number>
+```
+
+Defaults:
+- `version`: `1.0`
+- `build-number`: `1`
+
+Outputs:
+- `../non-GitHub/dist/PDF Splitter.app` for local builds
+- `../non-GitHub/dist/PDFSplitterMac-macOS.zip` for local builds
