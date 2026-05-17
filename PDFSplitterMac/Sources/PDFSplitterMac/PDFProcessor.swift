@@ -12,6 +12,7 @@ struct OutputOptions {
 
 enum PDFProcessingError: LocalizedError {
     case invalidPDF
+    case cancelled
     case webpUnavailable(String)
     case webpConversionFailed(String)
     case popplerUnavailable(String)
@@ -22,6 +23,8 @@ enum PDFProcessingError: LocalizedError {
         switch self {
         case .invalidPDF:
             return "Could not open the PDF file."
+        case .cancelled:
+            return "Processing stopped."
         case .webpUnavailable(let message):
             return message
         case .webpConversionFailed(let message):
@@ -33,6 +36,23 @@ enum PDFProcessingError: LocalizedError {
         case .imageDestinationFailed(let message):
             return message
         }
+    }
+}
+
+final class PDFProcessingCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
     }
 }
 
@@ -61,27 +81,30 @@ enum PDFProcessor {
         scalePercent: Int,
         webpQuality: Int,
         usePoppler: Bool,
-        chapter: String?,
+        prefix: String?,
+        shouldCancel: () -> Bool = { false },
         log: (String) -> Void
     ) throws {
         guard let document = PDFDocument(url: pdfURL) else {
             throw PDFProcessingError.invalidPDF
         }
 
+        try checkCancelled(shouldCancel)
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
         let pageCount = document.pageCount
-        let chapterPrefix = formatChapterPrefix(chapter)
+        let filenamePrefix = formatFilenamePrefix(prefix)
         let scaleFactor = max(0.1, Double(scalePercent) / 100.0)
 
         if outputs.pdf {
             for index in 0..<pageCount {
+                try checkCancelled(shouldCancel)
                 guard let page = document.page(at: index) else { continue }
                 let pageDoc = PDFDocument()
                 pageDoc.insert(page, at: 0)
 
                 let filename = pageFilename(
-                    chapterPrefix: chapterPrefix,
+                    filenamePrefix: filenamePrefix,
                     pageIndex: index,
                     fileExtension: "pdf"
                 )
@@ -91,29 +114,36 @@ enum PDFProcessor {
                 } else {
                     throw PDFProcessingError.imageDestinationFailed("Failed to write PDF: \(outputURL.path)")
                 }
+                try checkCancelled(shouldCancel)
             }
             log("Split into \(pageCount) single-page PDFs.")
         }
 
         let needsImages = outputs.png || outputs.webp
         if needsImages {
+            try checkCancelled(shouldCancel)
             let renderer = try imageRenderer(usePoppler: usePoppler)
             let webpMode = try webpExportModeIfNeeded(outputs.webp)
             for index in 0..<pageCount {
+                try checkCancelled(shouldCancel)
                 let page = document.page(at: index)
                 guard let rendered = try render(
                     page: page,
                     pageIndex: index,
                     pdfURL: pdfURL,
                     dpi: dpi,
-                    renderer: renderer
+                    renderer: renderer,
+                    shouldCancel: shouldCancel
                 ) else { continue }
+                try checkCancelled(shouldCancel)
                 let trimmed = trimWhitespace(image: rendered)
+                try checkCancelled(shouldCancel)
                 let padded = addPadding(image: trimmed, padding: max(0, padding))
                 let resized = resize(image: padded, scale: scaleFactor)
+                try checkCancelled(shouldCancel)
 
                 let baseFilename = pageFilename(
-                    chapterPrefix: chapterPrefix,
+                    filenamePrefix: filenamePrefix,
                     pageIndex: index,
                     fileExtension: nil
                 )
@@ -121,12 +151,14 @@ enum PDFProcessor {
                 var pngURLForCwebp: URL?
                 if outputs.png {
                     let pngURL = outputDirectory.appendingPathComponent("\(baseFilename).png")
+                    try checkCancelled(shouldCancel)
                     try writeImage(resized, to: pngURL, type: .png, dpi: dpi)
                     log("Saved PNG (\(dpi) DPI): \(pngURL.path)")
                     pngURLForCwebp = pngURL
                 }
 
                 if outputs.webp {
+                    try checkCancelled(shouldCancel)
                     let webpURL = outputDirectory.appendingPathComponent("\(baseFilename).webp")
                     guard let webpMode else {
                         throw PDFProcessingError.webpUnavailable("WEBP export is not supported on this system.")
@@ -138,6 +170,11 @@ enum PDFProcessor {
                         log("Saved WEBP: \(webpURL.path)")
                     case .cwebp(let executableURL):
                         var tempURL: URL?
+                        defer {
+                            if let tempURL {
+                                try? FileManager.default.removeItem(at: tempURL)
+                            }
+                        }
                         let inputURL: URL
                         if let pngURLForCwebp {
                             inputURL = pngURLForCwebp
@@ -152,11 +189,9 @@ enum PDFProcessor {
                             executable: executableURL,
                             inputURL: inputURL,
                             outputURL: webpURL,
-                            quality: webpQuality
+                            quality: webpQuality,
+                            shouldCancel: shouldCancel
                         )
-                        if let tempURL {
-                            try? FileManager.default.removeItem(at: tempURL)
-                        }
                         log("Saved WEBP (cwebp): \(webpURL.path)")
                     }
                 }
@@ -164,28 +199,31 @@ enum PDFProcessor {
         }
     }
 
-    private static func formatChapterPrefix(_ chapter: String?) -> String {
-        guard let chapter = chapter?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !chapter.isEmpty else {
+    private static func checkCancelled(_ shouldCancel: () -> Bool) throws {
+        if shouldCancel() {
+            throw PDFProcessingError.cancelled
+        }
+    }
+
+    private static func formatFilenamePrefix(_ prefix: String?) -> String {
+        guard let prefix = prefix?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !prefix.isEmpty else {
             return ""
         }
-        if let value = Int(chapter) {
-            return String(format: "CH%02d_", value)
-        }
-        return "\(chapter)_"
+        return prefix
     }
 
     private static func pageFilename(
-        chapterPrefix: String,
+        filenamePrefix: String,
         pageIndex: Int,
         fileExtension: String?
     ) -> String {
         let pageString = String(format: "%02d", pageIndex + 1)
         let baseName: String
-        if chapterPrefix.isEmpty {
+        if filenamePrefix.isEmpty {
             baseName = pageString
         } else {
-            baseName = "\(chapterPrefix)F\(pageString)_raschka"
+            baseName = "\(filenamePrefix)F\(pageString)_raschka"
         }
         if let fileExtension = fileExtension {
             return "\(baseName).\(fileExtension)"
@@ -198,8 +236,10 @@ enum PDFProcessor {
         pageIndex: Int,
         pdfURL: URL,
         dpi: Int,
-        renderer: ImageRenderer
+        renderer: ImageRenderer,
+        shouldCancel: () -> Bool
     ) throws -> CGImage? {
+        try checkCancelled(shouldCancel)
         switch renderer {
         case .pdfKit:
             guard let page else { return nil }
@@ -210,7 +250,8 @@ enum PDFProcessor {
                 tool: tool,
                 pdfURL: pdfURL,
                 pageIndex: pageIndex,
-                dpi: dpi
+                dpi: dpi,
+                shouldCancel: shouldCancel
             )
         }
     }
@@ -254,8 +295,10 @@ enum PDFProcessor {
         tool: PopplerTool,
         pdfURL: URL,
         pageIndex: Int,
-        dpi: Int
+        dpi: Int,
+        shouldCancel: () -> Bool
     ) throws -> CGImage? {
+        try checkCancelled(shouldCancel)
         let pageNumber = pageIndex + 1
         let tempDir = FileManager.default.temporaryDirectory
         let baseName = "pdfsplitter_\(UUID().uuidString)"
@@ -295,6 +338,9 @@ enum PDFProcessor {
                 outputURL
             ]
         }
+        defer {
+            removePopplerOutputs(prefix: baseName, candidates: candidates, in: tempDir)
+        }
 
         let process = Process()
         process.executableURL = executable
@@ -308,7 +354,7 @@ enum PDFProcessor {
         } catch {
             throw PDFProcessingError.popplerRenderFailed("Failed to launch poppler: \(error.localizedDescription)")
         }
-        process.waitUntilExit()
+        try waitForProcess(process, shouldCancel: shouldCancel)
         if process.terminationStatus != 0 {
             let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
             let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
@@ -331,11 +377,6 @@ enum PDFProcessor {
             throw PDFProcessingError.popplerRenderFailed("Failed to read poppler output: \(error.localizedDescription)")
         }
 
-        let cleanup = candidates + [imageURL]
-        for url in cleanup {
-            try? FileManager.default.removeItem(at: url)
-        }
-
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             return nil
@@ -352,6 +393,21 @@ enum PDFProcessor {
         }
         return contents.first { url in
             url.pathExtension.lowercased() == "png" && url.lastPathComponent.hasPrefix(prefix)
+        }
+    }
+
+    private static func removePopplerOutputs(prefix: String, candidates: [URL], in directory: URL) {
+        for url in candidates {
+            try? FileManager.default.removeItem(at: url)
+        }
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else {
+            return
+        }
+        for url in contents where url.pathExtension.lowercased() == "png" && url.lastPathComponent.hasPrefix(prefix) {
+            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -580,8 +636,10 @@ enum PDFProcessor {
         executable: URL,
         inputURL: URL,
         outputURL: URL,
-        quality: Int
+        quality: Int,
+        shouldCancel: () -> Bool
     ) throws {
+        try checkCancelled(shouldCancel)
         let process = Process()
         process.executableURL = executable
         process.arguments = ["-q", "\(quality)", inputURL.path, "-o", outputURL.path]
@@ -594,7 +652,14 @@ enum PDFProcessor {
         } catch {
             throw PDFProcessingError.webpConversionFailed("Failed to launch cwebp: \(error.localizedDescription)")
         }
-        process.waitUntilExit()
+        do {
+            try waitForProcess(process, shouldCancel: shouldCancel)
+        } catch {
+            if case PDFProcessingError.cancelled = error {
+                try? FileManager.default.removeItem(at: outputURL)
+            }
+            throw error
+        }
         if process.terminationStatus != 0 {
             let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
             let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
@@ -602,6 +667,20 @@ enum PDFProcessor {
             let stderr = String(data: stderrData, encoding: .utf8) ?? ""
             let message = ([stdout, stderr].joined(separator: "\n")).trimmingCharacters(in: .whitespacesAndNewlines)
             throw PDFProcessingError.webpConversionFailed("cwebp failed: \(message)")
+        }
+    }
+
+    private static func waitForProcess(
+        _ process: Process,
+        shouldCancel: () -> Bool
+    ) throws {
+        while process.isRunning {
+            if shouldCancel() {
+                process.terminate()
+                process.waitUntilExit()
+                throw PDFProcessingError.cancelled
+            }
+            Thread.sleep(forTimeInterval: 0.05)
         }
     }
 }

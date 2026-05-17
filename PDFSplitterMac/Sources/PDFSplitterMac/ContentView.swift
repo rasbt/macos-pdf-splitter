@@ -8,13 +8,15 @@ struct ContentView: View {
     @State private var dpiText = "200"
     @State private var paddingText = "20"
     @State private var scaleText = "100"
-    @State private var chapterText = ""
+    @State private var prefixText = "CH06_"
     @State private var outputPDF = true
     @State private var outputPNG = true
     @State private var outputWEBP = false
     @State private var webpQualityText = "90"
     @State private var usePoppler = true
     @State private var isProcessing = false
+    @State private var isStopping = false
+    @State private var processingCancellation: PDFProcessingCancellation?
     @State private var isDropTargeted = false
     @State private var logLines: [String] = ["Drop a PDF or choose a file."]
     @State private var showingAlert = false
@@ -75,8 +77,8 @@ struct ContentView: View {
                             .toggleStyle(.checkbox)
                     }
 
-                    LabeledRow(label: "Chapter:") {
-                        TextField("Optional", text: $chapterText)
+                    LabeledRow(label: "Prefix:") {
+                        TextField("Optional", text: $prefixText)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 160)
                     }
@@ -100,6 +102,13 @@ struct ContentView: View {
                     startProcessing()
                 }
                 .disabled(isProcessing)
+
+                if isProcessing {
+                    Button(isStopping ? "Stopping..." : "Stop") {
+                        stopProcessing()
+                    }
+                    .disabled(isStopping)
+                }
 
                 Button("Open Output") {
                     openOutputFolder()
@@ -261,9 +270,14 @@ struct ContentView: View {
         }
 
         isProcessing = true
+        isStopping = false
         appendLog("Starting processing...")
-        let chapter = chapterText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let chapterValue = chapter.isEmpty ? nil : chapter
+        let prefix = prefixText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixValue = prefix.isEmpty ? nil : prefix
+        let usePopplerValue = usePoppler
+        let webpQualityValue = webpQuality
+        let cancellation = PDFProcessingCancellation()
+        processingCancellation = cancellation
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -274,31 +288,49 @@ struct ContentView: View {
                     dpi: dpi,
                     padding: padding,
                     scalePercent: scalePercent,
-                    webpQuality: webpQuality,
-                    usePoppler: usePoppler,
-                    chapter: chapterValue,
+                    webpQuality: webpQualityValue,
+                    usePoppler: usePopplerValue,
+                    prefix: prefixValue,
+                    shouldCancel: {
+                        cancellation.isCancelled
+                    },
                     log: { message in
                         appendLogFromBackground(message)
                     }
                 )
                 DispatchQueue.main.async {
                     isProcessing = false
+                    isStopping = false
+                    processingCancellation = nil
                     appendLog("Done.")
                 }
             } catch {
                 DispatchQueue.main.async {
                     isProcessing = false
-                    showError(error.localizedDescription)
+                    isStopping = false
+                    processingCancellation = nil
+                    if case PDFProcessingError.cancelled = error {
+                        appendLog("Stopped.")
+                    } else {
+                        showError(error.localizedDescription)
+                    }
                 }
             }
         }
+    }
+
+    private func stopProcessing() {
+        guard let processingCancellation else { return }
+        isStopping = true
+        processingCancellation.cancel()
+        appendLog("Stopping processing...")
     }
 
     private func appendLog(_ message: String) {
         logLines.append(message)
     }
 
-    private func appendLogFromBackground(_ message: String) {
+    nonisolated private func appendLogFromBackground(_ message: String) {
         DispatchQueue.main.async {
             logLines.append(message)
         }
