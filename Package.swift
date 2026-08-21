@@ -17,5 +17,10 @@ let package = Package(
             name: "PDFSplitterMac",
             path: "PDFSplitterMac/Sources/PDFSplitterMac"
         ),
+        .testTarget(
+            name: "PDFSplitterMacTests",
+            dependencies: ["PDFSplitterMac"],
+            path: "PDFSplitterMac/Tests/PDFSplitterMacTests"
+        ),
     ]
 )

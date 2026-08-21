@@ -8,7 +8,11 @@ struct ContentView: View {
     @State private var dpiText = "200"
     @State private var paddingText = "20"
     @State private var scaleText = "100"
-    @State private var prefixText = "CH06_"
+    @State private var prefixText = "PrefixText_"
+    @State private var cropWhitespace = true
+    @State private var useBorder = false
+    @State private var borderColor = Color.black
+    @State private var borderLineWidthText = "3"
     @State private var outputPDF = true
     @State private var outputPNG = true
     @State private var outputWEBP = false
@@ -50,6 +54,28 @@ struct ContentView: View {
                             Toggle("WEBP", isOn: $outputWEBP)
                         }
                         .toggleStyle(.checkbox)
+                    }
+
+                    LabeledRow(label: "Crop:") {
+                        Toggle("Whitespace", isOn: $cropWhitespace)
+                            .toggleStyle(.checkbox)
+                    }
+
+                    LabeledRow(label: "Border:") {
+                        HStack(spacing: 12) {
+                            Toggle("Use", isOn: $useBorder)
+                                .toggleStyle(.checkbox)
+                            CompactColorWell(color: $borderColor)
+                                .frame(width: 16, height: 16)
+                                .clipped()
+                                .disabled(!useBorder)
+                            TextField("Width", text: $borderLineWidthText)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 56)
+                                .disabled(!useBorder)
+                            Text("px")
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
 
@@ -268,6 +294,25 @@ struct ContentView: View {
             }
             webpQuality = parsed
         }
+        var borderLineWidth = 3
+        if useBorder {
+            guard let parsed = Int(borderLineWidthText.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  parsed > 0 else {
+                showError("Border width must be a whole number greater than 0.")
+                return
+            }
+            borderLineWidth = parsed
+        }
+
+        let resolvedBorderColor = NSColor(borderColor).usingColorSpace(.deviceRGB) ?? .black
+        let borderOptions = BorderOptions(
+            enabled: useBorder,
+            red: Double(resolvedBorderColor.redComponent),
+            green: Double(resolvedBorderColor.greenComponent),
+            blue: Double(resolvedBorderColor.blueComponent),
+            alpha: Double(resolvedBorderColor.alphaComponent),
+            lineWidth: borderLineWidth
+        )
 
         isProcessing = true
         isStopping = false
@@ -275,6 +320,7 @@ struct ContentView: View {
         let prefix = prefixText.trimmingCharacters(in: .whitespacesAndNewlines)
         let prefixValue = prefix.isEmpty ? nil : prefix
         let usePopplerValue = usePoppler
+        let cropWhitespaceValue = cropWhitespace
         let webpQualityValue = webpQuality
         let cancellation = PDFProcessingCancellation()
         processingCancellation = cancellation
@@ -290,7 +336,9 @@ struct ContentView: View {
                     scalePercent: scalePercent,
                     webpQuality: webpQualityValue,
                     usePoppler: usePopplerValue,
+                    cropWhitespace: cropWhitespaceValue,
                     prefix: prefixValue,
+                    border: borderOptions,
                     shouldCancel: {
                         cancellation.isCancelled
                     },
@@ -359,5 +407,50 @@ private struct LabeledRow<Content: View>: View {
                 .foregroundColor(.secondary)
             content
         }
+    }
+}
+
+private struct CompactColorWell: NSViewRepresentable {
+    @Binding var color: Color
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(color: $color)
+    }
+
+    func makeNSView(context: Context) -> SquareColorWell {
+        let colorWell = SquareColorWell()
+        if #available(macOS 13.0, *) {
+            colorWell.colorWellStyle = .minimal
+        }
+        colorWell.color = NSColor(color)
+        colorWell.target = context.coordinator
+        colorWell.action = #selector(Coordinator.colorChanged(_:))
+        return colorWell
+    }
+
+    func updateNSView(_ colorWell: SquareColorWell, context: Context) {
+        colorWell.color = NSColor(color)
+        colorWell.isEnabled = isEnabled
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        private var color: Binding<Color>
+
+        init(color: Binding<Color>) {
+            self.color = color
+        }
+
+        @objc func colorChanged(_ sender: NSColorWell) {
+            color.wrappedValue = Color(nsColor: sender.color)
+        }
+    }
+}
+
+@MainActor
+private final class SquareColorWell: NSColorWell {
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: 16, height: 16)
     }
 }

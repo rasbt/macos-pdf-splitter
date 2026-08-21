@@ -10,6 +10,15 @@ struct OutputOptions {
     let webp: Bool
 }
 
+struct BorderOptions: Sendable {
+    let enabled: Bool
+    let red: Double
+    let green: Double
+    let blue: Double
+    let alpha: Double
+    let lineWidth: Int
+}
+
 enum PDFProcessingError: LocalizedError {
     case invalidPDF
     case cancelled
@@ -81,7 +90,9 @@ enum PDFProcessor {
         scalePercent: Int,
         webpQuality: Int,
         usePoppler: Bool,
+        cropWhitespace: Bool,
         prefix: String?,
+        border: BorderOptions,
         shouldCancel: () -> Bool = { false },
         log: (String) -> Void
     ) throws {
@@ -136,10 +147,11 @@ enum PDFProcessor {
                     shouldCancel: shouldCancel
                 ) else { continue }
                 try checkCancelled(shouldCancel)
-                let trimmed = trimWhitespace(image: rendered)
+                let cropped = cropWhitespaceIfEnabled(image: rendered, enabled: cropWhitespace)
                 try checkCancelled(shouldCancel)
-                let padded = addPadding(image: trimmed, padding: max(0, padding))
+                let padded = addPadding(image: cropped, padding: max(0, padding))
                 let resized = resize(image: padded, scale: scaleFactor)
+                let bordered = addBorder(image: resized, options: border)
                 try checkCancelled(shouldCancel)
 
                 let baseFilename = pageFilename(
@@ -152,7 +164,7 @@ enum PDFProcessor {
                 if outputs.png {
                     let pngURL = outputDirectory.appendingPathComponent("\(baseFilename).png")
                     try checkCancelled(shouldCancel)
-                    try writeImage(resized, to: pngURL, type: .png, dpi: dpi)
+                    try writeImage(bordered, to: pngURL, type: .png, dpi: dpi)
                     log("Saved PNG (\(dpi) DPI): \(pngURL.path)")
                     pngURLForCwebp = pngURL
                 }
@@ -166,7 +178,7 @@ enum PDFProcessor {
 
                     switch webpMode {
                     case .imageIO(let webpType):
-                        try writeImage(resized, to: webpURL, type: webpType, dpi: nil, quality: webpQuality)
+                        try writeImage(bordered, to: webpURL, type: webpType, dpi: nil, quality: webpQuality)
                         log("Saved WEBP: \(webpURL.path)")
                     case .cwebp(let executableURL):
                         var tempURL: URL?
@@ -180,7 +192,7 @@ enum PDFProcessor {
                             inputURL = pngURLForCwebp
                         } else {
                             let tmp = temporaryPNGURL(baseName: baseFilename)
-                            try writeImage(resized, to: tmp, type: .png, dpi: dpi)
+                            try writeImage(bordered, to: tmp, type: .png, dpi: dpi)
                             tempURL = tmp
                             inputURL = tmp
                         }
@@ -455,6 +467,11 @@ enum PDFProcessor {
         return image.cropping(to: cropRect) ?? image
     }
 
+    static func cropWhitespaceIfEnabled(image: CGImage, enabled: Bool) -> CGImage {
+        guard enabled else { return image }
+        return trimWhitespace(image: image)
+    }
+
     private static func addPadding(image: CGImage, padding: Int) -> CGImage {
         guard padding > 0 else { return image }
         let newWidth = image.width + padding * 2
@@ -506,6 +523,42 @@ enum PDFProcessor {
 
         context.interpolationQuality = .high
         context.draw(image, in: CGRect(x: 0, y: 0, width: newWidth, height: newHeight))
+        return context.makeImage() ?? image
+    }
+
+    static func addBorder(image: CGImage, options: BorderOptions) -> CGImage {
+        guard options.enabled, options.lineWidth > 0 else { return image }
+
+        let width = image.width
+        let height = image.height
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            return image
+        }
+
+        let imageRect = CGRect(x: 0, y: 0, width: width, height: height)
+        context.draw(image, in: imageRect)
+        context.setStrokeColor(
+            red: CGFloat(options.red),
+            green: CGFloat(options.green),
+            blue: CGFloat(options.blue),
+            alpha: CGFloat(options.alpha)
+        )
+        context.setShouldAntialias(false)
+
+        let lineWidth = min(CGFloat(options.lineWidth), CGFloat(min(width, height)))
+        context.setLineWidth(lineWidth)
+        let inset = lineWidth / 2
+        context.stroke(imageRect.insetBy(dx: inset, dy: inset))
         return context.makeImage() ?? image
     }
 

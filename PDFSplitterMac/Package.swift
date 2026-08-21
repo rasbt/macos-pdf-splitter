@@ -16,5 +16,9 @@ let package = Package(
         .executableTarget(
             name: "PDFSplitterMac"
         ),
+        .testTarget(
+            name: "PDFSplitterMacTests",
+            dependencies: ["PDFSplitterMac"]
+        ),
     ]
 )
